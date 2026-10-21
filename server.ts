@@ -819,7 +819,12 @@ async function startServer() {
   });
 }
 
-startServer().catch((err) => {
-  console.error('[IndoPlangsir Server] Failed to start:', err);
-  process.exit(1);
-});
+export { app };
+export default app;
+
+if (!process.env.VERCEL) {
+  startServer().catch((err) => {
+    console.error('[IndoPlangsir Server] Failed to start:', err);
+    process.exit(1);
+  });
+}
