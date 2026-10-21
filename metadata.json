@@ -1,0 +1,6 @@
+{
+  "name": "IndoPlangsir Order Notification Dashboard",
+  "description": "Dashboard notifikasi pesanan IndoPlangsir dari ElevenLabs AI Agent ke WhatsApp admin via WhatsApp Business Cloud API",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
