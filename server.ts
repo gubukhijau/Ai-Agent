@@ -13,6 +13,11 @@ import {
   getSupabaseConfig,
   updateRuntimeSupabaseConfig,
 } from './src/lib/supabase.ts';
+import {
+  processIncomingWhatsAppMessage,
+  sendWhatsAppMessageDirectly,
+  generateIndoPlangsirAIReply,
+} from './src/lib/whatsapp-ai-reply.ts';
 
 dotenv.config();
 
@@ -678,52 +683,25 @@ app.post('/api/webhooks/whatsapp', async (req: Request, res: Response) => {
   res.status(200).send('EVENT_RECEIVED');
 
   try {
-    const entry = req.body?.entry?.[0];
-    const changes = entry?.changes?.[0]?.value;
-    const messages = changes?.messages;
-    const contacts = changes?.contacts;
-
-    if (!messages || !Array.isArray(messages) || messages.length === 0) {
-      return; // Not a message event (delivery receipt or status ping)
-    }
-
-    const message = messages[0];
-    const fromPhone = message.from;
-    const messageType = message.type;
-    const senderName = contacts?.[0]?.profile?.name || 'Pelanggan WhatsApp';
-
-    if (messageType !== 'text') {
-      return; // Currently handling text conversations
-    }
-
-    const userText = message.text?.body;
-    if (!userText || !fromPhone) return;
-
-    // Generate AI Agent response (ElevenLabs agent or IndoPlangsir AI)
-    const { reply, source, orderDetected } = await generateAgentReply(userText, fromPhone, senderName);
-
-    // Record in transient chat log for live admin monitoring
-    recordAIChatLog({
-      fromPhone: maskString(fromPhone, 4, 3),
-      fromName: senderName,
-      userMessage: userText,
-      agentReply: reply,
-      agentSource: source,
-      orderDetected,
+    const result = await processIncomingWhatsAppMessage(req.body, {
+      whatsappPhoneNumberId: runtimeConfig.whatsappPhoneNumberId,
+      whatsappAccessToken: runtimeConfig.whatsappAccessToken,
+      whatsappApiVersion: runtimeConfig.whatsappApiVersion,
+      whatsappAdminNumber: runtimeConfig.whatsappAdminNumber,
+      elevenlabsAgentId: runtimeConfig.elevenlabsAgentId,
+      elevenlabsApiKey: runtimeConfig.elevenlabsApiKey,
     });
 
-    // Also persist chat to Supabase database if configured
-    insertChatLogToSupabase({
-      from_phone: fromPhone,
-      from_name: senderName,
-      user_message: userText,
-      agent_reply: reply,
-      agent_source: source,
-      order_detected: orderDetected,
-    }).catch((dbErr) => console.error('[Supabase Chat Insert Error]', dbErr?.message || dbErr));
-
-    // Send AI reply back to the customer on WhatsApp via WhatsApp Cloud API
-    await sendWhatsAppTextMessage(fromPhone, reply);
+    if (result.processed && result.fromPhone && result.userMessage && result.replyText) {
+      recordAIChatLog({
+        fromPhone: maskString(result.fromPhone, 4, 3),
+        fromName: result.senderName || 'Pelanggan WhatsApp',
+        userMessage: result.userMessage,
+        agentReply: result.replyText,
+        agentSource: 'indoplangsir_ai',
+        orderDetected: result.orderDetected,
+      });
+    }
   } catch (err) {
     console.error('[WhatsApp Inbound Webhook] Error processing incoming chat:', err);
   }
@@ -1247,6 +1225,60 @@ app.post('/api/admin/test-ai-chat', requireAdminAuth, async (req: Request, res: 
     orderDetected: result.orderDetected,
   });
 });
+
+// POST /api/admin/whatsapp/live-test-reply
+// Sends a real WhatsApp message to an actual phone number via WhatsApp Cloud API
+app.post(
+  '/api/admin/whatsapp/live-test-reply',
+  requireAdminAuth,
+  rateLimitTestEndpoint,
+  async (req: Request, res: Response) => {
+    const { recipientPhone, testMessage } = req.body || {};
+    const target = recipientPhone || runtimeConfig.whatsappAdminNumber;
+
+    if (!target) {
+      return res.status(400).json({
+        success: false,
+        message: 'Nomor WhatsApp tujuan wajib diisi (contoh: 6281234567890).',
+      });
+    }
+
+    const promptText = testMessage || 'Halo, berapa estimasi tarif tanah merah urug 5 rit ke lokasi proyek?';
+    const { reply, source, orderDetected } = await generateIndoPlangsirAIReply(promptText, target, 'Pelanggan');
+
+    const sendRes = await sendWhatsAppMessageDirectly(target, reply, {
+      phoneNumberId: runtimeConfig.whatsappPhoneNumberId,
+      accessToken: runtimeConfig.whatsappAccessToken,
+      apiVersion: runtimeConfig.whatsappApiVersion,
+    });
+
+    if (!sendRes.success) {
+      return res.status(400).json({
+        success: false,
+        message: `Gagal mengirim ke WhatsApp ${target}: ${sendRes.error}`,
+        error: sendRes.error,
+        generatedReply: reply,
+      });
+    }
+
+    recordAIChatLog({
+      fromPhone: maskString(target, 4, 3),
+      fromName: 'Live Test (WhatsApp Nyata)',
+      userMessage: promptText,
+      agentReply: reply,
+      agentSource: 'indoplangsir_ai',
+      orderDetected,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: `Pesan balasan AI berhasil dikirim langsung ke WhatsApp nomor ${target}! Silakan cek aplikasi WhatsApp di ponsel Anda.`,
+      whatsappMessageId: sendRes.messageId,
+      replyText: reply,
+      source,
+    });
+  }
+);
 
 // GET /api/admin/ai-chats
 app.get('/api/admin/ai-chats', requireAdminAuth, (_req: Request, res: Response) => {

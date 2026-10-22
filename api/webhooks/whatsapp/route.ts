@@ -101,35 +101,19 @@ export async function POST(request: Request) {
       return new Response('Bad Request: Invalid JSON', { status: 400 });
     }
 
-    // Meta WhatsApp Cloud API requires returning HTTP 200 within 3 seconds
-    // Optional Supabase logging if configured
-    if (process.env.SUPABASE_URL && (process.env.SUPABASE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY)) {
-      try {
-        const { insertChatLogToSupabase } = await import('@/src/lib/supabase');
-        const entry = payload?.entry?.[0];
-        const changes = entry?.changes?.[0]?.value;
-        const messages = changes?.messages;
-        const contacts = changes?.contacts;
-
-        if (messages && Array.isArray(messages) && messages.length > 0) {
-          const message = messages[0];
-          if (message.type === 'text') {
-            await insertChatLogToSupabase({
-              from_phone: message.from,
-              from_name: contacts?.[0]?.profile?.name || 'Pelanggan WhatsApp',
-              user_message: message.text?.body || '',
-              agent_reply: '(Inbound WhatsApp Webhook received)',
-              agent_source: 'meta_webhook',
-              order_detected: false,
-            });
-          }
-        }
-      } catch (dbErr) {
-        // Do not fail webhook response if database logging fails
-        console.error('[Meta Webhook POST] Failed to log to Supabase:', dbErr);
-      }
+    // Process incoming message and send reply DIRECTLY to customer WhatsApp via Meta Cloud API
+    // Execute asynchronously so HTTP 200 is returned immediately within Meta 3s timeout
+    try {
+      const { processIncomingWhatsAppMessage } = await import('@/src/lib/whatsapp-ai-reply.ts');
+      // Fire-and-forget background processing
+      processIncomingWhatsAppMessage(payload).catch((procErr) => {
+        console.error('[Meta Webhook POST] Error executing WhatsApp auto-reply:', procErr);
+      });
+    } catch (importErr) {
+      console.error('[Meta Webhook POST] Error importing whatsapp-ai-reply:', importErr);
     }
 
+    // Return immediate HTTP 200 plain text response to Meta
     return new Response('EVENT_RECEIVED', {
       status: 200,
       headers: { 'Content-Type': 'text/plain; charset=utf-8' },

@@ -82,9 +82,21 @@ export default async function handler(req: any, res: any) {
         }
       }
 
-      // Validated. Meta expects 200 plain text response
+      // Validated. Meta expects 200 plain text response within 3s
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-      return res.status(200).send('EVENT_RECEIVED');
+      res.status(200).send('EVENT_RECEIVED');
+
+      // Process message in background and reply directly on WhatsApp
+      try {
+        const payload = typeof req.body === 'object' && req.body !== null ? req.body : JSON.parse(rawBody);
+        const { processIncomingWhatsAppMessage } = await import('@/src/lib/whatsapp-ai-reply.ts');
+        processIncomingWhatsAppMessage(payload).catch((err: any) => {
+          console.error('[Meta Webhook POST] Error sending WhatsApp reply:', err?.message || err);
+        });
+      } catch (e) {
+        // quiet
+      }
+      return;
     } catch (err: any) {
       console.error('[Meta Webhook POST] Error handling event');
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');

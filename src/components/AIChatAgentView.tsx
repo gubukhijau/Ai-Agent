@@ -19,7 +19,13 @@ import {
   Smartphone
 } from 'lucide-react';
 import { AdminConfig, AIChatLogEntry, AIChatMessage } from '../types';
-import { saveAdminConfig, testAIChat, fetchAIChats, clearAIChats } from '../services/api';
+import {
+  saveAdminConfig,
+  testAIChat,
+  fetchAIChats,
+  clearAIChats,
+  sendLiveWhatsAppTestReply,
+} from '../services/api';
 
 interface AIChatAgentViewProps {
   config: AdminConfig | null;
@@ -42,6 +48,19 @@ export const AIChatAgentView: React.FC<AIChatAgentViewProps> = ({
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<{ success: boolean; text: string } | null>(null);
 
+  // Direct Live WhatsApp Test State (Bukan Simulator)
+  const [rightTabMode, setRightTabMode] = useState<'live_whatsapp' | 'simulator'>('live_whatsapp');
+  const [liveRecipient, setLiveRecipient] = useState('');
+  const [liveTestPrompt, setLiveTestPrompt] = useState('Halo, mau tanya harga urug tanah merah 5 rit ke Bekasi');
+  const [sendingLiveWA, setSendingLiveWA] = useState(false);
+  const [liveWAResult, setLiveWAResult] = useState<{
+    success: boolean;
+    message: string;
+    whatsappMessageId?: string;
+    replyText?: string;
+    error?: string;
+  } | null>(null);
+
   // Interactive Simulator State
   const [chatInput, setChatInput] = useState('');
   const [sendingChat, setSendingChat] = useState(false);
@@ -62,6 +81,9 @@ export const AIChatAgentView: React.FC<AIChatAgentViewProps> = ({
     if (config) {
       if (config.whatsappWebhookVerifyToken) setVerifyToken(config.whatsappWebhookVerifyToken);
       if (config.elevenlabsAgentId) setAgentId(config.elevenlabsAgentId);
+      if (config.whatsappAdminNumberRaw && !liveRecipient) {
+        setLiveRecipient(config.whatsappAdminNumberRaw);
+      }
     }
   }, [config]);
 
@@ -112,6 +134,29 @@ export const AIChatAgentView: React.FC<AIChatAgentViewProps> = ({
       setSaveMsg({ success: false, text: err?.message || 'Gagal menyimpan konfigurasi.' });
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleLiveWhatsAppTest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!liveRecipient.trim()) {
+      setLiveWAResult({ success: false, message: 'Nomor WhatsApp tujuan wajib diisi.' });
+      return;
+    }
+    setSendingLiveWA(true);
+    setLiveWAResult(null);
+
+    try {
+      const res = await sendLiveWhatsAppTestReply(liveRecipient.trim(), liveTestPrompt.trim());
+      setLiveWAResult(res);
+      loadLogs();
+    } catch (err: any) {
+      setLiveWAResult({
+        success: false,
+        message: err?.message || 'Gagal mengirim pesan langsung ke WhatsApp.',
+      });
+    } finally {
+      setSendingLiveWA(false);
     }
   };
 
@@ -369,110 +414,255 @@ export const AIChatAgentView: React.FC<AIChatAgentViewProps> = ({
           </div>
         </div>
 
-        {/* Right Column: Live Chat Simulator & Recent Chats (6 cols) */}
+        {/* Right Column: Live WhatsApp Test & Chat Simulator (6 cols) */}
         <div className="lg:col-span-6 space-y-6">
-          {/* WhatsApp Interactive Simulator */}
+          {/* Main Panel with Mode Selector */}
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-800 pb-3 gap-2">
               <div className="flex items-center gap-2">
                 <Smartphone className="w-4 h-4 text-emerald-400" />
                 <h3 className="text-sm font-bold text-white">
-                  Simulator Chat Pelanggan WhatsApp
+                  Pengujian Balasan AI WhatsApp
                 </h3>
               </div>
-              <span className="text-[11px] text-slate-400 flex items-center gap-1">
-                <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-                AI Agent Siap
-              </span>
+              {/* Tab Selector: Live WhatsApp vs Simulator */}
+              <div className="flex bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setRightTabMode('live_whatsapp')}
+                  className={`px-3 py-1 rounded-md font-semibold transition-colors flex items-center gap-1.5 cursor-pointer ${
+                    rightTabMode === 'live_whatsapp'
+                      ? 'bg-emerald-600 text-white'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Send className="w-3 h-3" />
+                  <span>WhatsApp Asli (HP)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRightTabMode('simulator')}
+                  className={`px-3 py-1 rounded-md font-semibold transition-colors flex items-center gap-1.5 cursor-pointer ${
+                    rightTabMode === 'simulator'
+                      ? 'bg-slate-800 text-amber-400'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Smartphone className="w-3 h-3" />
+                  <span>Simulator Web</span>
+                </button>
+              </div>
             </div>
 
-            {/* Chat Screen Mockup */}
-            <div className="bg-[#0b141a] border border-slate-800 rounded-xl overflow-hidden shadow-inner flex flex-col h-[340px]">
-              {/* Chat Header */}
-              <div className="bg-[#1f2c34] px-4 py-2.5 flex items-center gap-3 border-b border-slate-800/80">
-                <div className="w-8 h-8 rounded-full bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400 font-bold text-xs">
-                  IP
+            {/* TAB 1: LIVE WHATSAPP PHONE TEST (BUKAN SIMULATOR) */}
+            {rightTabMode === 'live_whatsapp' && (
+              <div className="space-y-4">
+                <div className="p-3.5 bg-emerald-500/10 border border-emerald-500/25 rounded-xl text-xs text-emerald-200 space-y-1.5">
+                  <div className="font-bold flex items-center gap-1.5 text-emerald-400 text-xs">
+                    <CheckCircle2 className="w-4 h-4 shrink-0" />
+                    <span>Mode Kirim WhatsApp Langsung Aktif</span>
+                  </div>
+                  <p className="text-[11px] leading-relaxed text-slate-300">
+                    Sistem ini mengirim balasan AI secara <strong>nyata ke aplikasi WhatsApp di nomor ponsel Anda</strong> melalui Meta WhatsApp Business Cloud API (bukan cuma simulasi web).
+                  </p>
                 </div>
-                <div>
-                  <div className="text-xs font-semibold text-white">IndoPlangsir AI Assistant</div>
-                  <div className="text-[10px] text-emerald-400">Online &bull; Siap melayani order</div>
-                </div>
-              </div>
 
-              {/* Chat Messages Body */}
-              <div className="flex-1 p-3.5 overflow-y-auto space-y-2.5 text-xs">
-                {simulatedChatHistory.map((msg) => (
+                <form onSubmit={handleLiveWhatsAppTest} className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">
+                      Nomor WhatsApp Tujuan (Ponsel Anda / Admin)
+                    </label>
+                    <input
+                      type="text"
+                      value={liveRecipient}
+                      onChange={(e) => setLiveRecipient(e.target.value)}
+                      placeholder="Contoh: 6281234567890 (format internasional tanpa +)"
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-xs font-mono text-white focus:outline-hidden focus:border-emerald-500"
+                    />
+                    <p className="text-[10px] text-slate-400 mt-1">
+                      Pastikan nomor diawali kode negara 62 (contoh: 6281234567890).
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">
+                      Pesan Pertanyaan Pelanggan (Prompt Uji)
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={liveTestPrompt}
+                      onChange={(e) => setLiveTestPrompt(e.target.value)}
+                      placeholder="Ketik pertanyaan calon pemesan tanah urug / buang puing..."
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-xs text-white focus:outline-hidden focus:border-emerald-500"
+                    />
+                  </div>
+
+                  {/* Quick Prompts */}
+                  <div className="flex flex-wrap gap-1.5">
+                    {[
+                      'Berapa harga tanah urug merah 5 rit ke Bekasi?',
+                      'Bisa buang puing proyek 3 rit hari ini di Jaksel?',
+                      'Berapa kapasitas dump truck tronton & colt diesel?',
+                    ].map((sample, idx) => (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => setLiveTestPrompt(sample)}
+                        className="text-[10px] px-2 py-1 bg-slate-950 hover:bg-slate-800 text-slate-300 rounded border border-slate-800 transition-colors"
+                      >
+                        {sample}
+                      </button>
+                    ))}
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={sendingLiveWA || !liveRecipient.trim()}
+                    className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-lg text-xs flex items-center justify-center gap-2 transition-colors disabled:opacity-50 cursor-pointer shadow-md"
+                  >
+                    {sendingLiveWA ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin text-white" />
+                        <span>AI Memproses & Mengirim ke WhatsApp HP...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Send className="w-3.5 h-3.5 text-white" />
+                        <span>Kirim Balasan AI Langsung ke WhatsApp Ponsel Saya</span>
+                      </>
+                    )}
+                  </button>
+                </form>
+
+                {/* Result Box */}
+                {liveWAResult && (
                   <div
-                    key={msg.id}
-                    className={`flex flex-col ${
-                      msg.sender === 'user' ? 'items-end' : 'items-start'
+                    className={`p-3.5 rounded-xl border text-xs ${
+                      liveWAResult.success
+                        ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                        : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
                     }`}
                   >
-                    <div
-                      className={`max-w-[85%] rounded-lg p-2.5 shadow-sm text-xs leading-relaxed whitespace-pre-wrap ${
-                        msg.sender === 'user'
-                          ? 'bg-[#005c4b] text-white rounded-tr-none'
-                          : 'bg-[#202c33] text-slate-100 rounded-tl-none border border-slate-700/40'
-                      }`}
-                    >
-                      {msg.text}
-                    </div>
-                    <span className="text-[9px] text-slate-400 mt-0.5 px-1 font-mono">
-                      {msg.timestamp}
-                    </span>
-                  </div>
-                ))}
-                {sendingChat && (
-                  <div className="flex items-start">
-                    <div className="bg-[#202c33] text-slate-300 rounded-lg rounded-tl-none p-2 text-xs flex items-center gap-1.5 border border-slate-700/40">
-                      <RefreshCw className="w-3 h-3 animate-spin text-amber-400" />
-                      <span>Mengetik balasan...</span>
+                    <div className="flex items-start gap-2">
+                      {liveWAResult.success ? (
+                        <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                      ) : (
+                        <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                      )}
+                      <div className="flex-1 space-y-1">
+                        <div className="font-bold text-white">
+                          {liveWAResult.success ? 'Berhasil Terkirim ke WhatsApp!' : 'Pengiriman WhatsApp Gagal'}
+                        </div>
+                        <p className="leading-relaxed">{liveWAResult.message}</p>
+                        {liveWAResult.whatsappMessageId && (
+                          <div className="text-[10px] font-mono text-emerald-400 bg-slate-950/80 p-1.5 rounded mt-1">
+                            Message ID Meta: {liveWAResult.whatsappMessageId}
+                          </div>
+                        )}
+                        {liveWAResult.replyText && (
+                          <div className="mt-2 bg-slate-950/80 p-2.5 rounded-lg border border-slate-800 text-[11px] text-slate-200 whitespace-pre-wrap">
+                            <span className="text-amber-400 block font-semibold mb-1">
+                              Isi Pesan WhatsApp yang Terkirim ke Ponsel:
+                            </span>
+                            {liveWAResult.replyText}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
                 )}
-              </div>
 
-              {/* Chat Input Bar */}
-              <form onSubmit={handleSendSimulatedMessage} className="p-2 bg-[#1f2c34] border-t border-slate-800 flex gap-2">
-                <input
-                  type="text"
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  placeholder="Ketik pesan pelanggan (misal: Mau tanya harga urug tanah)..."
-                  className="flex-1 px-3 py-1.5 bg-[#2a3942] border border-transparent rounded-lg text-xs text-white placeholder-slate-400 focus:outline-hidden focus:border-amber-500"
-                />
-                <button
-                  type="submit"
-                  disabled={sendingChat || !chatInput.trim()}
-                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors disabled:opacity-50 cursor-pointer"
-                >
-                  <Send className="w-3 h-3" />
-                  <span>Kirim</span>
-                </button>
-              </form>
-            </div>
-
-            {/* Quick Test Prompt Shortcuts */}
-            <div className="space-y-1.5">
-              <span className="text-[11px] text-slate-400 block font-medium">Contoh Pertanyaan Cepat:</span>
-              <div className="flex flex-wrap gap-1.5">
-                {[
-                  'Berapa harga tanah urug per rit?',
-                  'Kapasitas dump truck colt diesel berapa kubik?',
-                  'Bisa buang puing proyek 3 rit hari ini di Tebet?',
-                  'Saya mau pesan tanah merah 8 rit ke Bekasi',
-                ].map((promptText, idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    onClick={() => setChatInput(promptText)}
-                    className="px-2.5 py-1 bg-slate-950 hover:bg-slate-800 border border-slate-800 text-[11px] text-slate-300 rounded-md transition-colors"
-                  >
-                    {promptText}
-                  </button>
-                ))}
+                {/* Requirement Checklist for Production Two-Way WhatsApp */}
+                <div className="p-3 bg-slate-950 border border-slate-800 rounded-lg text-xs space-y-2">
+                  <div className="font-bold text-white flex items-center gap-1.5">
+                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Syarat Chat Masuk dari WhatsApp Otomatis Dibalas:</span>
+                  </div>
+                  <ul className="space-y-1 text-[11px] text-slate-400 list-disc list-inside">
+                    <li>
+                      Di <strong>Meta Developers &rarr; WhatsApp &rarr; Configuration</strong>, pastikan Webhook URL sudah terverifikasi.
+                    </li>
+                    <li>
+                      Pada bagian <strong>Webhook fields</strong>, klik <strong>Manage</strong> dan pastikan field <code className="text-emerald-400">messages</code> dicentang <strong>Subscribed</strong>.
+                    </li>
+                    <li>
+                      Variabel <code className="text-amber-400">WHATSAPP_PHONE_NUMBER_ID</code> dan <code className="text-amber-400">WHATSAPP_ACCESS_TOKEN</code> sudah aktif di server / Vercel.
+                    </li>
+                  </ul>
+                </div>
               </div>
-            </div>
+            )}
+
+            {/* TAB 2: WEB SIMULATOR */}
+            {rightTabMode === 'simulator' && (
+              <div className="space-y-4">
+                {/* Chat Screen Mockup */}
+                <div className="bg-[#0b141a] border border-slate-800 rounded-xl overflow-hidden shadow-inner flex flex-col h-[320px]">
+                  {/* Chat Header */}
+                  <div className="bg-[#1f2c34] px-4 py-2.5 flex items-center gap-3 border-b border-slate-800/80">
+                    <div className="w-8 h-8 rounded-full bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400 font-bold text-xs">
+                      IP
+                    </div>
+                    <div>
+                      <div className="text-xs font-semibold text-white">IndoPlangsir AI Assistant</div>
+                      <div className="text-[10px] text-emerald-400">Online &bull; Siap melayani order</div>
+                    </div>
+                  </div>
+
+                  {/* Chat Messages Body */}
+                  <div className="flex-1 p-3.5 overflow-y-auto space-y-2.5 text-xs">
+                    {simulatedChatHistory.map((msg) => (
+                      <div
+                        key={msg.id}
+                        className={`flex flex-col ${
+                          msg.sender === 'user' ? 'items-end' : 'items-start'
+                        }`}
+                      >
+                        <div
+                          className={`max-w-[85%] rounded-lg p-2.5 shadow-sm text-xs leading-relaxed whitespace-pre-wrap ${
+                            msg.sender === 'user'
+                              ? 'bg-[#005c4b] text-white rounded-tr-none'
+                              : 'bg-[#202c33] text-slate-100 rounded-tl-none border border-slate-700/40'
+                          }`}
+                        >
+                          {msg.text}
+                        </div>
+                        <span className="text-[9px] text-slate-400 mt-0.5 px-1 font-mono">
+                          {msg.timestamp}
+                        </span>
+                      </div>
+                    ))}
+                    {sendingChat && (
+                      <div className="flex items-start">
+                        <div className="bg-[#202c33] text-slate-300 rounded-lg rounded-tl-none p-2 text-xs flex items-center gap-1.5 border border-slate-700/40">
+                          <RefreshCw className="w-3 h-3 animate-spin text-amber-400" />
+                          <span>Mengetik balasan...</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Chat Input Bar */}
+                  <form onSubmit={handleSendSimulatedMessage} className="p-2 bg-[#1f2c34] border-t border-slate-800 flex gap-2">
+                    <input
+                      type="text"
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      placeholder="Ketik pesan pelanggan (misal: Mau tanya harga urug tanah)..."
+                      className="flex-1 px-3 py-1.5 bg-[#2a3942] border border-transparent rounded-lg text-xs text-white placeholder-slate-400 focus:outline-hidden focus:border-amber-500"
+                    />
+                    <button
+                      type="submit"
+                      disabled={sendingChat || !chatInput.trim()}
+                      className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors disabled:opacity-50 cursor-pointer"
+                    >
+                      <Send className="w-3 h-3" />
+                      <span>Kirim</span>
+                    </button>
+                  </form>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>

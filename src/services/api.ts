@@ -265,6 +265,37 @@ export async function testAIChat(
   }
 }
 
+export async function sendLiveWhatsAppTestReply(
+  recipientPhone: string,
+  testMessage?: string
+): Promise<{
+  success: boolean;
+  message: string;
+  whatsappMessageId?: string;
+  replyText?: string;
+  source?: string;
+  error?: string;
+}> {
+  try {
+    const res = await fetch('/api/admin/whatsapp/live-test-reply', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ recipientPhone, testMessage }),
+    });
+    if (res.status === 401) {
+      notifyAuthExpired();
+      throw new Error('Sesi admin berakhir.');
+    }
+    return await res.json();
+  } catch (err: any) {
+    return {
+      success: false,
+      message: err?.message || 'Gagal mengirim pesan ke WhatsApp.',
+      error: err?.message,
+    };
+  }
+}
+
 export async function fetchAIChats(): Promise<AIChatLogEntry[]> {
   const token = getStoredToken();
   if (!token) return [];
