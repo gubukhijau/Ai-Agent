@@ -107,6 +107,8 @@ export async function saveAdminConfig(config: Partial<{
   whatsappAdminNumber: string;
   whatsappApiVersion: string;
   whatsappTemplateName: string;
+  whatsappAppSecret: string;
+  whatsappVerifyToken: string;
   whatsappWebhookVerifyToken: string;
   elevenlabsWebhookSecret: string;
   elevenlabsAgentId: string;
@@ -296,3 +298,109 @@ export async function clearAIChats(): Promise<void> {
     // ignore
   }
 }
+
+// ==========================================
+// SUPABASE DATABASE API
+// ==========================================
+
+export async function fetchSupabaseStatus(): Promise<{
+  isConfigured: boolean;
+  url: string;
+  hasKey: boolean;
+  ordersCount: number;
+  chatsCount: number;
+  dispatchCount: number;
+}> {
+  try {
+    const res = await fetch('/api/admin/supabase/status', {
+      headers: getAuthHeaders(),
+    });
+    if (res.status === 401) {
+      notifyAuthExpired();
+      return { isConfigured: false, url: '', hasKey: false, ordersCount: 0, chatsCount: 0, dispatchCount: 0 };
+    }
+    if (!res.ok) {
+      return { isConfigured: false, url: '', hasKey: false, ordersCount: 0, chatsCount: 0, dispatchCount: 0 };
+    }
+    return await res.json();
+  } catch {
+    return { isConfigured: false, url: '', hasKey: false, ordersCount: 0, chatsCount: 0, dispatchCount: 0 };
+  }
+}
+
+export async function saveSupabaseConfig(supabaseUrl: string, supabaseKey: string): Promise<{ success: boolean; message: string }> {
+  try {
+    const res = await fetch('/api/admin/supabase/config', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ supabaseUrl, supabaseKey }),
+    });
+    if (res.status === 401) {
+      notifyAuthExpired();
+      throw new Error('Sesi admin berakhir.');
+    }
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.message || 'Gagal menyimpan konfigurasi Supabase.');
+    }
+    return data;
+  } catch (err: any) {
+    throw new Error(err?.message || 'Gagal menyimpan konfigurasi Supabase.');
+  }
+}
+
+export async function testSupabaseConnection(supabaseUrl?: string, supabaseKey?: string): Promise<{
+  success: boolean;
+  message: string;
+  details?: { ordersCount?: number; chatsCount?: number };
+}> {
+  try {
+    const res = await fetch('/api/admin/supabase/test', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ supabaseUrl, supabaseKey }),
+    });
+    if (res.status === 401) {
+      notifyAuthExpired();
+      return { success: false, message: 'Sesi admin kedaluwarsa.' };
+    }
+    return await res.json();
+  } catch (err: any) {
+    return { success: false, message: err?.message || 'Gagal menguji koneksi Supabase.' };
+  }
+}
+
+export async function fetchSupabaseOrders(): Promise<any[]> {
+  try {
+    const res = await fetch('/api/admin/supabase/orders', {
+      headers: getAuthHeaders(),
+    });
+    if (res.status === 401) {
+      notifyAuthExpired();
+      return [];
+    }
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.orders || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function fetchSupabaseChats(): Promise<any[]> {
+  try {
+    const res = await fetch('/api/admin/supabase/chats', {
+      headers: getAuthHeaders(),
+    });
+    if (res.status === 401) {
+      notifyAuthExpired();
+      return [];
+    }
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.chats || [];
+  } catch {
+    return [];
+  }
+}
+

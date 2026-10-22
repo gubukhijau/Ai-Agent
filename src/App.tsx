@@ -18,10 +18,11 @@ import { WhatsAppSettingsView } from './components/WhatsAppSettingsView';
 import { ElevenLabsIntegrationView } from './components/ElevenLabsIntegrationView';
 import { AIChatAgentView } from './components/AIChatAgentView';
 import { SecuritySettingsView } from './components/SecuritySettingsView';
+import { SupabaseView } from './components/SupabaseView';
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
-  const [currentTab, setCurrentTab] = useState<'dashboard' | 'whatsapp' | 'elevenlabs' | 'aichat' | 'security'>('dashboard');
+  const [currentTab, setCurrentTab] = useState<'dashboard' | 'whatsapp' | 'elevenlabs' | 'aichat' | 'supabase' | 'security'>('dashboard');
   const [config, setConfig] = useState<AdminConfig | null>(null);
   const [loadingConfig, setLoadingConfig] = useState(false);
   const [isMobileOpen, setIsMobileOpen] = useState(false);
@@ -89,6 +90,7 @@ export default function App() {
   const tabTitles: Record<typeof currentTab, string> = {
     dashboard: 'Dashboard Utama',
     aichat: 'Chat AI Agent WhatsApp',
+    supabase: 'Database Supabase',
     whatsapp: 'Pengaturan WhatsApp Cloud API',
     elevenlabs: 'Integrasi Webhook Order',
     security: 'Keamanan & Autentikasi',
@@ -143,8 +145,12 @@ export default function App() {
             </span>
             <span className="text-slate-700">&bull;</span>
             <span className="text-slate-400">
-              AI Chat Agent:{' '}
-              <span className="text-emerald-400 font-medium">Aktif</span>
+              Supabase:{' '}
+              {config?.supabaseConfigured ? (
+                <span className="text-emerald-400 font-medium">Aktif</span>
+              ) : (
+                <span className="text-slate-500">Standby</span>
+              )}
             </span>
           </div>
 
@@ -181,6 +187,10 @@ export default function App() {
 
           {currentTab === 'aichat' && (
             <AIChatAgentView config={config} onRefreshConfig={loadConfig} />
+          )}
+
+          {currentTab === 'supabase' && (
+            <SupabaseView config={config} onRefreshConfig={loadConfig} />
           )}
 
           {currentTab === 'whatsapp' && (

@@ -3,6 +3,16 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
+import {
+  insertOrderToSupabase,
+  insertChatLogToSupabase,
+  insertDispatchLogToSupabase,
+  fetchSupabaseOrders,
+  fetchSupabaseChats,
+  testSupabaseConnection,
+  getSupabaseConfig,
+  updateRuntimeSupabaseConfig,
+} from './src/lib/supabase.ts';
 
 dotenv.config();
 
@@ -21,7 +31,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-admin-token');
+  res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-admin-token, x-hub-signature-256');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
 
   if (req.method === 'OPTIONS') {
@@ -30,8 +40,15 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
-// Middleware for parsing JSON with limit protection
-app.use(express.json({ limit: '1mb' }));
+// Middleware for parsing JSON with limit protection and rawBody buffer for HMAC signature verification
+app.use(
+  express.json({
+    limit: '1mb',
+    verify: (req: any, _res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 
 // In-Memory Configuration state (falls back to process.env)
 const runtimeConfig = {
@@ -40,7 +57,9 @@ const runtimeConfig = {
   whatsappAdminNumber: process.env.WHATSAPP_ADMIN_NUMBER || '',
   whatsappApiVersion: process.env.WHATSAPP_API_VERSION || 'v21.0',
   whatsappTemplateName: process.env.WHATSAPP_TEMPLATE_NAME || '',
-  whatsappWebhookVerifyToken: process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || 'ipl_wa_verify_2026',
+  whatsappAppSecret: process.env.WHATSAPP_APP_SECRET || '',
+  whatsappVerifyToken: process.env.WHATSAPP_VERIFY_TOKEN || process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || 'ipl_wa_verify_2026',
+  whatsappWebhookVerifyToken: process.env.WHATSAPP_VERIFY_TOKEN || process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || 'ipl_wa_verify_2026',
   elevenlabsWebhookSecret: process.env.ELEVENLABS_WEBHOOK_SECRET || 'ipl_sec_elevenlabs_order_2026',
   elevenlabsAgentId: process.env.ELEVENLABS_AGENT_ID || '',
   elevenlabsApiKey: process.env.ELEVENLABS_API_KEY || '',
@@ -591,6 +610,31 @@ function validateOrderPayload(body: any): { valid: boolean; error?: string; orde
 // API ROUTES
 // ==========================================
 
+// Helper: Verify Meta X-Hub-Signature-256 using WHATSAPP_APP_SECRET
+function verifyMetaSignature(req: Request, appSecret: string): { valid: boolean; reason?: string } {
+  if (!appSecret || !appSecret.trim()) {
+    return { valid: true }; // Not enforced if app secret is not configured
+  }
+
+  const sigHeader = req.headers['x-hub-signature-256'] as string;
+  if (!sigHeader || !sigHeader.startsWith('sha256=')) {
+    return { valid: false, reason: 'Header X-Hub-Signature-256 tidak ada atau format tidak valid.' };
+  }
+
+  const rawBody = (req as any).rawBody || Buffer.from(JSON.stringify(req.body));
+  const expectedHash = crypto.createHmac('sha256', appSecret.trim()).update(rawBody).digest('hex');
+  const expectedSig = `sha256=${expectedHash}`;
+
+  const sigBuf = Buffer.from(sigHeader);
+  const expBuf = Buffer.from(expectedSig);
+
+  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+    return { valid: false, reason: 'Tanda tangan X-Hub-Signature-256 tidak cocok dengan WHATSAPP_APP_SECRET.' };
+  }
+
+  return { valid: true };
+}
+
 // 0. INBOUND WHATSAPP CHAT WEBHOOK (Meta Cloud API Two-Way Chat & ElevenLabs AI Agent)
 // GET /api/webhooks/whatsapp - Meta Webhook Verification Handshake
 app.get('/api/webhooks/whatsapp', (req: Request, res: Response) => {
@@ -598,18 +642,39 @@ app.get('/api/webhooks/whatsapp', (req: Request, res: Response) => {
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  if (mode === 'subscribe' && token === runtimeConfig.whatsappWebhookVerifyToken) {
-    console.log('[WhatsApp Webhook] Handshake verified successfully with Meta!');
-    return res.status(200).send(challenge);
+  const expectedToken =
+    runtimeConfig.whatsappVerifyToken ||
+    process.env.WHATSAPP_VERIFY_TOKEN ||
+    runtimeConfig.whatsappWebhookVerifyToken;
+
+  // Verify hub.mode === 'subscribe' and token matches
+  if (mode === 'subscribe' && expectedToken && token === expectedToken) {
+    console.log('[Meta Webhook GET] Handshake verified successfully with Meta!');
+    // Return challenge as direct plain text with HTTP 200 (NOT JSON)
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    return res.status(200).send(String(challenge || ''));
   } else {
-    console.warn('[WhatsApp Webhook] Verification failed. Tokens do not match.');
-    return res.sendStatus(403);
+    console.warn('[Meta Webhook GET] Verification failed. Mode or token mismatch.');
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    return res.status(403).send('Forbidden: Token mismatch or invalid mode');
   }
 });
 
 // POST /api/webhooks/whatsapp - Receives incoming customer messages from WhatsApp
 app.post('/api/webhooks/whatsapp', async (req: Request, res: Response) => {
-  // Always return 200 immediately to Meta (under 3s response SLA)
+  // Validate X-Hub-Signature-256 if WHATSAPP_APP_SECRET is set
+  const appSecret = runtimeConfig.whatsappAppSecret || process.env.WHATSAPP_APP_SECRET;
+  if (appSecret) {
+    const sigCheck = verifyMetaSignature(req, appSecret);
+    if (!sigCheck.valid) {
+      console.warn('[Meta Webhook POST] Signature validation rejected.');
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      return res.status(403).send('Forbidden: Signature mismatch');
+    }
+  }
+
+  // Always return 200 plain text response immediately to Meta (under 3s response SLA)
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
   res.status(200).send('EVENT_RECEIVED');
 
   try {
@@ -646,6 +711,16 @@ app.post('/api/webhooks/whatsapp', async (req: Request, res: Response) => {
       agentSource: source,
       orderDetected,
     });
+
+    // Also persist chat to Supabase database if configured
+    insertChatLogToSupabase({
+      from_phone: fromPhone,
+      from_name: senderName,
+      user_message: userText,
+      agent_reply: reply,
+      agent_source: source,
+      order_detected: orderDetected,
+    }).catch((dbErr) => console.error('[Supabase Chat Insert Error]', dbErr?.message || dbErr));
 
     // Send AI reply back to the customer on WhatsApp via WhatsApp Cloud API
     await sendWhatsAppTextMessage(fromPhone, reply);
@@ -707,6 +782,20 @@ app.post('/api/webhooks/elevenlabs/order', async (req: Request, res: Response) =
       errorMessage: `Deduplikasi aktif: order serupa diproses ${elapsedSeconds} detik yang lalu.`,
     });
 
+    // Save duplicate event to Supabase
+    insertOrderToSupabase({
+      nama_pelanggan: order.nama_pelanggan,
+      nomor_whatsapp: order.nomor_whatsapp,
+      alamat_lokasi: order.alamat_lokasi,
+      jenis_layanan: order.jenis_layanan,
+      jenis_kendaraan: order.jenis_kendaraan,
+      jumlah_rit: String(order.jumlah_rit),
+      jadwal: order.jadwal,
+      catatan: order.catatan,
+      status_notifikasi: 'duplicate',
+      error_message: `Deduplikasi aktif: diproses ${elapsedSeconds} detik yang lalu.`,
+    }).catch(() => {});
+
     return res.status(200).json({
       success: true,
       status: 'deduplicated',
@@ -740,6 +829,31 @@ app.post('/api/webhooks/elevenlabs/order', async (req: Request, res: Response) =
       rawResponse: dispatchResult.raw,
     });
 
+    // Save failed order to Supabase
+    insertOrderToSupabase({
+      nama_pelanggan: order.nama_pelanggan,
+      nomor_whatsapp: order.nomor_whatsapp,
+      alamat_lokasi: order.alamat_lokasi,
+      jenis_layanan: order.jenis_layanan,
+      jenis_kendaraan: order.jenis_kendaraan,
+      jumlah_rit: String(order.jumlah_rit),
+      jadwal: order.jadwal,
+      catatan: order.catatan,
+      status_notifikasi: 'failed',
+      error_message: dispatchResult.errorMessage,
+    }).catch(() => {});
+
+    insertDispatchLogToSupabase({
+      source: 'webhook',
+      customer_name: order.nama_pelanggan,
+      service: order.jenis_layanan,
+      vehicle: order.jenis_kendaraan,
+      status: 'failed',
+      status_code: dispatchResult.statusCode,
+      recipient: maskString(runtimeConfig.whatsappAdminNumber),
+      error_message: dispatchResult.errorMessage,
+    }).catch(() => {});
+
     return res.status(dispatchResult.statusCode >= 500 ? 502 : dispatchResult.statusCode).json({
       success: false,
       error: 'WHATSAPP_DISPATCH_FAILED',
@@ -760,6 +874,31 @@ app.post('/api/webhooks/elevenlabs/order', async (req: Request, res: Response) =
     recipient: maskString(runtimeConfig.whatsappAdminNumber),
     rawResponse: dispatchResult.raw,
   });
+
+  // Save successful order and dispatch log to Supabase
+  insertOrderToSupabase({
+    nama_pelanggan: order.nama_pelanggan,
+    nomor_whatsapp: order.nomor_whatsapp,
+    alamat_lokasi: order.alamat_lokasi,
+    jenis_layanan: order.jenis_layanan,
+    jenis_kendaraan: order.jenis_kendaraan,
+    jumlah_rit: String(order.jumlah_rit),
+    jadwal: order.jadwal,
+    catatan: order.catatan,
+    status_notifikasi: 'delivered',
+    whatsapp_message_id: dispatchResult.messageId,
+  }).catch(() => {});
+
+  insertDispatchLogToSupabase({
+    source: 'webhook',
+    customer_name: order.nama_pelanggan,
+    service: order.jenis_layanan,
+    vehicle: order.jenis_kendaraan,
+    status: 'delivered',
+    status_code: dispatchResult.statusCode,
+    whatsapp_message_id: dispatchResult.messageId,
+    recipient: maskString(runtimeConfig.whatsappAdminNumber),
+  }).catch(() => {});
 
   return res.status(200).json({
     success: true,
@@ -904,6 +1043,8 @@ app.get('/api/admin/config', requireAdminAuth, (req: Request, res: Response) => 
     runtimeConfig.whatsappAdminNumber.trim()
   );
 
+  const supabaseCfg = getSupabaseConfig();
+
   return res.status(200).json({
     isConfigured,
     whatsappPhoneNumberIdSet: Boolean(runtimeConfig.whatsappPhoneNumberId.trim()),
@@ -916,6 +1057,9 @@ app.get('/api/admin/config', requireAdminAuth, (req: Request, res: Response) => 
     whatsappPhoneNumberIdRaw: runtimeConfig.whatsappPhoneNumberId,
     whatsappApiVersion: runtimeConfig.whatsappApiVersion,
     whatsappTemplateName: runtimeConfig.whatsappTemplateName,
+    whatsappAppSecretSet: Boolean(runtimeConfig.whatsappAppSecret.trim()),
+    whatsappAppSecretMasked: maskString(runtimeConfig.whatsappAppSecret, 4, 3),
+    whatsappVerifyToken: runtimeConfig.whatsappVerifyToken,
     whatsappWebhookVerifyToken: runtimeConfig.whatsappWebhookVerifyToken,
     whatsappInboundWebhookUrl,
     elevenlabsWebhookSecret: runtimeConfig.elevenlabsWebhookSecret,
@@ -926,6 +1070,8 @@ app.get('/api/admin/config', requireAdminAuth, (req: Request, res: Response) => 
     deduplicationWindowMinutes: runtimeConfig.deduplicationWindowMs / 60000,
     activeDeduplicationCount: deduplicationCache.size,
     rateLimitTestsPerMinute: 5,
+    supabaseConfigured: supabaseCfg.isConfigured,
+    supabaseUrlMasked: maskString(supabaseCfg.url, 12, 6),
   });
 });
 
@@ -937,6 +1083,8 @@ app.post('/api/admin/config', requireAdminAuth, (req: Request, res: Response) =>
     whatsappAdminNumber,
     whatsappApiVersion,
     whatsappTemplateName,
+    whatsappAppSecret,
+    whatsappVerifyToken,
     whatsappWebhookVerifyToken,
     elevenlabsWebhookSecret,
     elevenlabsAgentId,
@@ -960,7 +1108,14 @@ app.post('/api/admin/config', requireAdminAuth, (req: Request, res: Response) =>
   if (typeof whatsappTemplateName === 'string') {
     runtimeConfig.whatsappTemplateName = whatsappTemplateName.trim();
   }
-  if (typeof whatsappWebhookVerifyToken === 'string' && whatsappWebhookVerifyToken.trim()) {
+  if (typeof whatsappAppSecret === 'string') {
+    runtimeConfig.whatsappAppSecret = whatsappAppSecret.trim();
+  }
+  if (typeof whatsappVerifyToken === 'string' && whatsappVerifyToken.trim()) {
+    runtimeConfig.whatsappVerifyToken = whatsappVerifyToken.trim();
+    runtimeConfig.whatsappWebhookVerifyToken = whatsappVerifyToken.trim();
+  } else if (typeof whatsappWebhookVerifyToken === 'string' && whatsappWebhookVerifyToken.trim()) {
+    runtimeConfig.whatsappVerifyToken = whatsappWebhookVerifyToken.trim();
     runtimeConfig.whatsappWebhookVerifyToken = whatsappWebhookVerifyToken.trim();
   }
   if (typeof elevenlabsWebhookSecret === 'string' && elevenlabsWebhookSecret.trim()) {
@@ -986,6 +1141,67 @@ app.post('/api/admin/config', requireAdminAuth, (req: Request, res: Response) =>
     success: true,
     message: 'Pengaturan berhasil diperbarui di memori runtime server.',
   });
+});
+
+// ==========================================
+// SUPABASE DATABASE ADMIN ROUTES
+// ==========================================
+
+// GET /api/admin/supabase/status
+app.get('/api/admin/supabase/status', requireAdminAuth, async (_req: Request, res: Response) => {
+  const cfg = getSupabaseConfig();
+  if (!cfg.isConfigured) {
+    return res.status(200).json({
+      isConfigured: false,
+      url: '',
+      hasKey: false,
+      ordersCount: 0,
+      chatsCount: 0,
+      dispatchCount: 0,
+    });
+  }
+
+  const test = await testSupabaseConnection();
+  return res.status(200).json({
+    isConfigured: true,
+    url: maskString(cfg.url, 12, 6),
+    hasKey: true,
+    ordersCount: test.details?.ordersCount || 0,
+    chatsCount: test.details?.chatsCount || 0,
+    dispatchCount: 0,
+  });
+});
+
+// POST /api/admin/supabase/config
+app.post('/api/admin/supabase/config', requireAdminAuth, (req: Request, res: Response) => {
+  const { supabaseUrl, supabaseKey } = req.body || {};
+  if (typeof supabaseUrl === 'string' && typeof supabaseKey === 'string') {
+    updateRuntimeSupabaseConfig(supabaseUrl, supabaseKey);
+    return res.status(200).json({
+      success: true,
+      message: 'Kredensial Supabase berhasil disimpan di runtime server.',
+    });
+  }
+  return res.status(400).json({ success: false, message: 'URL dan Key Supabase wajib diisi.' });
+});
+
+// POST /api/admin/supabase/test
+app.post('/api/admin/supabase/test', requireAdminAuth, async (req: Request, res: Response) => {
+  const { supabaseUrl, supabaseKey } = req.body || {};
+  const result = await testSupabaseConnection(supabaseUrl, supabaseKey);
+  return res.status(200).json(result);
+});
+
+// GET /api/admin/supabase/orders
+app.get('/api/admin/supabase/orders', requireAdminAuth, async (_req: Request, res: Response) => {
+  const orders = await fetchSupabaseOrders(50);
+  return res.status(200).json({ orders });
+});
+
+// GET /api/admin/supabase/chats
+app.get('/api/admin/supabase/chats', requireAdminAuth, async (_req: Request, res: Response) => {
+  const chats = await fetchSupabaseChats(50);
+  return res.status(200).json({ chats });
 });
 
 // 5. TRANSIENT DISPATCH LOGS

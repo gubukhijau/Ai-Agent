@@ -32,6 +32,8 @@ export const WhatsAppSettingsView: React.FC<WhatsAppSettingsViewProps> = ({
   const [accessToken, setAccessToken] = useState('');
   const [apiVersion, setApiVersion] = useState('v21.0');
   const [templateName, setTemplateName] = useState('');
+  const [appSecret, setAppSecret] = useState('');
+  const [verifyToken, setVerifyToken] = useState('ipl_wa_verify_2026');
 
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<{ success: boolean; message: string } | null>(null);
@@ -51,6 +53,7 @@ export const WhatsAppSettingsView: React.FC<WhatsAppSettingsViewProps> = ({
       if (config.whatsappPhoneNumberIdRaw) setPhoneNumberId(config.whatsappPhoneNumberIdRaw);
       if (config.whatsappApiVersion) setApiVersion(config.whatsappApiVersion);
       if (config.whatsappTemplateName) setTemplateName(config.whatsappTemplateName);
+      if (config.whatsappVerifyToken) setVerifyToken(config.whatsappVerifyToken);
     }
   }, [config]);
 
@@ -67,10 +70,13 @@ export const WhatsAppSettingsView: React.FC<WhatsAppSettingsViewProps> = ({
         whatsappAccessToken: accessToken || undefined, // only send if non-empty
         whatsappApiVersion: apiVersion,
         whatsappTemplateName: templateName,
+        whatsappAppSecret: appSecret || undefined,
+        whatsappVerifyToken: verifyToken,
       });
 
       setSaveStatus({ success: true, message: res.message });
       setAccessToken(''); // clear sensitive token input after save
+      setAppSecret(''); // clear secret
       onRefreshConfig();
     } catch (err: any) {
       setSaveStatus({ success: false, message: err?.message || 'Gagal menyimpan pengaturan.' });
@@ -257,6 +263,34 @@ export const WhatsAppSettingsView: React.FC<WhatsAppSettingsViewProps> = ({
                   className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-xs text-white font-mono focus:outline-hidden focus:border-amber-500 transition-colors"
                 />
                 <p className="text-[11px] text-slate-400 mt-1">Hanya jika nomor mewajibkan template Meta</p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Meta App Secret (WHATSAPP_APP_SECRET)
+                </label>
+                <input
+                  type="password"
+                  value={appSecret}
+                  onChange={(e) => setAppSecret(e.target.value)}
+                  placeholder={config?.whatsappAppSecretSet ? `•••••••••••• (${config.whatsappAppSecretMasked})` : 'App Secret dari Meta Developers > Basic Settings'}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-xs text-white font-mono focus:outline-hidden focus:border-amber-500 transition-colors"
+                />
+                <p className="text-[11px] text-slate-400 mt-1">Digunakan untuk memvalidasi tanda tangan X-Hub-Signature-256</p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Webhook Verify Token (WHATSAPP_VERIFY_TOKEN)
+                </label>
+                <input
+                  type="text"
+                  value={verifyToken}
+                  onChange={(e) => setVerifyToken(e.target.value)}
+                  placeholder="ipl_wa_verify_2026"
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-xs text-white font-mono focus:outline-hidden focus:border-amber-500 transition-colors"
+                />
+                <p className="text-[11px] text-slate-400 mt-1">Dicocokkan saat Meta melakukan handshake GET verifikasi webhook</p>
               </div>
             </div>
 

@@ -8,13 +8,14 @@ import {
   ExternalLink,
   Truck,
   CheckCircle2,
-  AlertCircle
+  AlertCircle,
+  Database,
 } from 'lucide-react';
 import { AdminConfig } from '../types';
 
 interface SidebarProps {
-  currentTab: 'dashboard' | 'whatsapp' | 'elevenlabs' | 'aichat' | 'security';
-  setCurrentTab: (tab: 'dashboard' | 'whatsapp' | 'elevenlabs' | 'aichat' | 'security') => void;
+  currentTab: 'dashboard' | 'whatsapp' | 'elevenlabs' | 'aichat' | 'supabase' | 'security';
+  setCurrentTab: (tab: 'dashboard' | 'whatsapp' | 'elevenlabs' | 'aichat' | 'supabase' | 'security') => void;
   config: AdminConfig | null;
   onLogout: () => void;
   isMobileOpen: boolean;
@@ -43,10 +44,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
       description: 'ElevenLabs Two-Way Chatbot',
     },
     {
+      id: 'supabase' as const,
+      label: 'Database Supabase',
+      icon: Database,
+      description: 'PostgreSQL Orders & Chat',
+    },
+    {
       id: 'whatsapp' as const,
       label: 'Pengaturan WhatsApp',
       icon: MessageSquare,
-      description: 'Meta Cloud API & Nomor Admin',
+      description: 'Meta Cloud API & Webhook',
     },
     {
       id: 'elevenlabs' as const,
@@ -58,7 +65,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       id: 'security' as const,
       label: 'Pengaturan Keamanan',
       icon: ShieldCheck,
-      description: 'Bearer Token & Anti-Duplikasi',
+      description: 'HMAC Secret & Bearer Token',
     },
   ];
 
