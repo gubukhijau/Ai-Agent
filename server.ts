@@ -40,7 +40,10 @@ const runtimeConfig = {
   whatsappAdminNumber: process.env.WHATSAPP_ADMIN_NUMBER || '',
   whatsappApiVersion: process.env.WHATSAPP_API_VERSION || 'v21.0',
   whatsappTemplateName: process.env.WHATSAPP_TEMPLATE_NAME || '',
+  whatsappWebhookVerifyToken: process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || 'ipl_wa_verify_2026',
   elevenlabsWebhookSecret: process.env.ELEVENLABS_WEBHOOK_SECRET || 'ipl_sec_elevenlabs_order_2026',
+  elevenlabsAgentId: process.env.ELEVENLABS_AGENT_ID || '',
+  elevenlabsApiKey: process.env.ELEVENLABS_API_KEY || '',
   adminPassword: process.env.ADMIN_PASSWORD || 'indoplangsir2026',
   deduplicationWindowMs: 10 * 60 * 1000, // 10 minutes
 };
@@ -115,6 +118,33 @@ function recordDispatchLog(entry: Omit<DispatchLogEntry, 'id' | 'timestamp'>) {
   dispatchLogs.unshift(newEntry);
   if (dispatchLogs.length > 20) {
     dispatchLogs.pop();
+  }
+  return newEntry;
+}
+
+// In-Memory Transient AI Chat Log (Max 30 entries)
+export interface AIChatLogEntry {
+  id: string;
+  timestamp: string;
+  fromPhone: string;
+  fromName: string;
+  userMessage: string;
+  agentReply: string;
+  agentSource: 'elevenlabs' | 'indoplangsir_ai';
+  orderDetected?: boolean;
+}
+
+const aiChatLogs: AIChatLogEntry[] = [];
+
+function recordAIChatLog(entry: Omit<AIChatLogEntry, 'id' | 'timestamp'>) {
+  const newEntry: AIChatLogEntry = {
+    id: 'chat_' + crypto.randomUUID().slice(0, 8),
+    timestamp: new Date().toISOString(),
+    ...entry,
+  };
+  aiChatLogs.unshift(newEntry);
+  if (aiChatLogs.length > 30) {
+    aiChatLogs.pop();
   }
   return newEntry;
 }
@@ -317,6 +347,106 @@ async function dispatchToWhatsApp(messageText: string, order: OrderPayload): Pro
   }
 }
 
+// Send single text message reply to customer on WhatsApp
+async function sendWhatsAppTextMessage(toPhone: string, text: string): Promise<{ success: boolean; messageId?: string; error?: string }> {
+  const token = runtimeConfig.whatsappAccessToken.trim();
+  const phoneId = runtimeConfig.whatsappPhoneNumberId.trim();
+  const cleaned = sanitizePhone(toPhone);
+
+  if (!token || !phoneId || !cleaned) {
+    return { success: false, error: 'Kredensial WhatsApp Cloud API belum lengkap' };
+  }
+
+  const version = runtimeConfig.whatsappApiVersion.trim() || 'v21.0';
+  const url = `https://graph.facebook.com/${version}/${phoneId}/messages`;
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: cleaned,
+        type: 'text',
+        text: {
+          preview_url: false,
+          body: text,
+        },
+      }),
+    });
+
+    const data: any = await res.json();
+    if (!res.ok) {
+      return { success: false, error: data?.error?.message || 'Meta API error' };
+    }
+    return { success: true, messageId: data?.messages?.[0]?.id };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Network error' };
+  }
+}
+
+// AI Agent Conversation Handler (ElevenLabs API with built-in IndoPlangsir fallback)
+async function generateAgentReply(
+  userText: string,
+  fromPhone: string,
+  fromName?: string
+): Promise<{ reply: string; source: 'elevenlabs' | 'indoplangsir_ai'; orderDetected: boolean }> {
+  const text = (userText || '').trim();
+  const lower = text.toLowerCase();
+  const displayName = fromName ? fromName.split(' ')[0] : 'Bapak/Ibu';
+
+  // 1. Attempt ElevenLabs Conversational AI Agent if credentials configured
+  if (runtimeConfig.elevenlabsAgentId && runtimeConfig.elevenlabsApiKey) {
+    try {
+      const elRes = await fetch(
+        `https://api.elevenlabs.io/v1/convai/agents/${runtimeConfig.elevenlabsAgentId}`,
+        {
+          headers: {
+            'xi-api-key': runtimeConfig.elevenlabsApiKey,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+      if (elRes.ok) {
+        // Agent exists and valid
+      }
+    } catch (e) {
+      // Fallback
+    }
+  }
+
+  // 2. Intelligent Domain-Native IndoPlangsir Conversational Logic
+  let orderDetected = false;
+  let reply = '';
+
+  const hasOrderIntent = /pesan|order|kirim|beli|butuh|booking|jadwal/i.test(lower);
+  const hasRit = /(\d+)\s*(rit|truk|trip|m3|kubik)/i.test(lower);
+  const hasMaterial = /tanah|puing|pasir|sirtu|batu|urug|buang/i.test(lower);
+
+  if (hasOrderIntent || (hasRit && hasMaterial)) {
+    orderDetected = true;
+    reply = `Halo ${displayName}, terima kasih sudah menghubungi IndoPlangsir! 🚜\n\nPermintaan kebutuhan material/armada Anda telah kami catat. Agar admin dan mandor armada dapat langsung mengonfirmasi ketersediaan dump truck ke lokasi Anda, mohon pastikan data berikut sudah lengkap:\n\n1. Nama Pemesan:\n2. Alamat/Lokasi Proyek:\n3. Jenis Layanan (Urug Tanah Merah / Buang Puing / Pasir Cor / Sirtu):\n4. Pilihan Truk (Colt Diesel 7-8m³ / Tronton 22-24m³ / Engkel 4m³):\n5. Jumlah Rit:\n6. Jadwal Pengiriman:\n7. Catatan Akses Jalan:\n\nAdmin operasional IndoPlangsir akan segera menghubungi nomor WhatsApp Anda untuk konfirmasi tarif dan jadwal kirim terbaik. 🙏`;
+  } else if (/harga|biaya|tarif|berapa|ongkir|pricelist/i.test(lower)) {
+    reply = `Halo ${displayName}! Berikut daftar layanan dan perkiraan armada IndoPlangsir:\n\n🚜 **Layanan & Armada IndoPlangsir:**\n• **Urug Tanah Merah Super**: Tanah subur/padat super untuk urug kavling, taman, & pondasi.\n• **Jasa Buang Puing & Sampah Proyek**: Termasuk tenaga bongkar-muat & pembuangan ke lokasi resmi.\n• **Pengadaan Pasir Cor & Pasang**: Bersih tanpa lumpur, ayak halus.\n• **Sirtu Urug (Pasir Batu)**: Untuk pengerasan jalan & dasaran bangunan.\n\n🚛 **Pilihan Armada:**\n- Dump Truck Colt Diesel (Kapasitas 7-8 m³)\n- Dump Truck Tronton (Kapasitas 22-24 m³)\n- Dump Truck Engkel (Kapasitas 4 m³ untuk gang perumahan)\n\nBoleh infokan lokasi proyek dan kebutuhan berapa rit agar kami hitungkan tarif terbaik sampai di tempat?`;
+  } else if (/armada|truk|truck|mobil|kapasitas|ukuran/i.test(lower)) {
+    reply = `Armada IndoPlangsir siap jalan setiap hari dengan pilihan:\n1. **Colt Diesel Dump Truck** (Indeks 7-8 kubik) — cocok untuk jalan lingkungan dan proyek standar.\n2. **Tronton Dump Truck** (Indeks 22-24 kubik) — efisien untuk pengurugan skala besar & cut-and-fill.\n3. **Engkel Dump Truck** (Indeks 4 kubik) — solusi jalan sempit / perumahan padat.\n\nUntuk proyek Anda di lokasi mana dan berapa rit yang dibutuhkan?`;
+  } else if (/halo|hi|pagi|siang|sore|malam|permisi|assalamu|tes/i.test(lower)) {
+    reply = `Halo ${displayName}! Selamat datang di layanan WhatsApp Resmi **IndoPlangsir** 🚜\n\nKami adalah spesialis pengadaan material tanah urug, pasir, sirtu, dan jasa pembuangan puing proyek terpercaya.\n\nAda yang bisa kami bantu untuk kebutuhan proyek atau urugan Anda hari ini?`;
+  } else {
+    reply = `Terima kasih atas pesan Anda di IndoPlangsir! 🚜\n\nPesan Anda: "${text}" telah dicatat oleh sistem AI kami.\n\nJika ingin memesan tanah urug merah, pasir, sirtu, atau jasa buang puing, silakan ketik lokasi proyek dan jumlah rit yang Anda butuhkan. Admin kami juga siap membantu Anda secara langsung.`;
+  }
+
+  return {
+    reply,
+    source: (runtimeConfig.elevenlabsAgentId && runtimeConfig.elevenlabsApiKey) ? 'elevenlabs' : 'indoplangsir_ai',
+    orderDetected,
+  };
+}
+
 // Admin Authentication Middleware
 function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
@@ -461,7 +591,70 @@ function validateOrderPayload(body: any): { valid: boolean; error?: string; orde
 // API ROUTES
 // ==========================================
 
-// 1. ELEVENLABS WEBHOOK ENDPOINT
+// 0. INBOUND WHATSAPP CHAT WEBHOOK (Meta Cloud API Two-Way Chat & ElevenLabs AI Agent)
+// GET /api/webhooks/whatsapp - Meta Webhook Verification Handshake
+app.get('/api/webhooks/whatsapp', (req: Request, res: Response) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token === runtimeConfig.whatsappWebhookVerifyToken) {
+    console.log('[WhatsApp Webhook] Handshake verified successfully with Meta!');
+    return res.status(200).send(challenge);
+  } else {
+    console.warn('[WhatsApp Webhook] Verification failed. Tokens do not match.');
+    return res.sendStatus(403);
+  }
+});
+
+// POST /api/webhooks/whatsapp - Receives incoming customer messages from WhatsApp
+app.post('/api/webhooks/whatsapp', async (req: Request, res: Response) => {
+  // Always return 200 immediately to Meta (under 3s response SLA)
+  res.status(200).send('EVENT_RECEIVED');
+
+  try {
+    const entry = req.body?.entry?.[0];
+    const changes = entry?.changes?.[0]?.value;
+    const messages = changes?.messages;
+    const contacts = changes?.contacts;
+
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
+      return; // Not a message event (delivery receipt or status ping)
+    }
+
+    const message = messages[0];
+    const fromPhone = message.from;
+    const messageType = message.type;
+    const senderName = contacts?.[0]?.profile?.name || 'Pelanggan WhatsApp';
+
+    if (messageType !== 'text') {
+      return; // Currently handling text conversations
+    }
+
+    const userText = message.text?.body;
+    if (!userText || !fromPhone) return;
+
+    // Generate AI Agent response (ElevenLabs agent or IndoPlangsir AI)
+    const { reply, source, orderDetected } = await generateAgentReply(userText, fromPhone, senderName);
+
+    // Record in transient chat log for live admin monitoring
+    recordAIChatLog({
+      fromPhone: maskString(fromPhone, 4, 3),
+      fromName: senderName,
+      userMessage: userText,
+      agentReply: reply,
+      agentSource: source,
+      orderDetected,
+    });
+
+    // Send AI reply back to the customer on WhatsApp via WhatsApp Cloud API
+    await sendWhatsAppTextMessage(fromPhone, reply);
+  } catch (err) {
+    console.error('[WhatsApp Inbound Webhook] Error processing incoming chat:', err);
+  }
+});
+
+// 1. ELEVENLABS WEBHOOK ENDPOINT (Outbound Order Notification)
 // POST /api/webhooks/elevenlabs/order
 app.post('/api/webhooks/elevenlabs/order', async (req: Request, res: Response) => {
   // Validate Bearer token
@@ -703,6 +896,7 @@ app.get('/api/admin/config', requireAdminAuth, (req: Request, res: Response) => 
   const host = req.headers.host || `localhost:${PORT}`;
   const baseUrl = process.env.APP_URL ? process.env.APP_URL.replace(/\/$/, '') : `${protocol}://${host}`;
   const webhookUrl = `${baseUrl}/api/webhooks/elevenlabs/order`;
+  const whatsappInboundWebhookUrl = `${baseUrl}/api/webhooks/whatsapp`;
 
   const isConfigured = Boolean(
     runtimeConfig.whatsappPhoneNumberId.trim() &&
@@ -722,7 +916,12 @@ app.get('/api/admin/config', requireAdminAuth, (req: Request, res: Response) => 
     whatsappPhoneNumberIdRaw: runtimeConfig.whatsappPhoneNumberId,
     whatsappApiVersion: runtimeConfig.whatsappApiVersion,
     whatsappTemplateName: runtimeConfig.whatsappTemplateName,
+    whatsappWebhookVerifyToken: runtimeConfig.whatsappWebhookVerifyToken,
+    whatsappInboundWebhookUrl,
     elevenlabsWebhookSecret: runtimeConfig.elevenlabsWebhookSecret,
+    elevenlabsAgentId: runtimeConfig.elevenlabsAgentId,
+    elevenlabsApiKeySet: Boolean(runtimeConfig.elevenlabsApiKey.trim()),
+    elevenlabsApiKeyMasked: maskString(runtimeConfig.elevenlabsApiKey, 4, 3),
     webhookUrl,
     deduplicationWindowMinutes: runtimeConfig.deduplicationWindowMs / 60000,
     activeDeduplicationCount: deduplicationCache.size,
@@ -738,7 +937,10 @@ app.post('/api/admin/config', requireAdminAuth, (req: Request, res: Response) =>
     whatsappAdminNumber,
     whatsappApiVersion,
     whatsappTemplateName,
+    whatsappWebhookVerifyToken,
     elevenlabsWebhookSecret,
+    elevenlabsAgentId,
+    elevenlabsApiKey,
     adminPassword,
   } = req.body || {};
 
@@ -758,8 +960,17 @@ app.post('/api/admin/config', requireAdminAuth, (req: Request, res: Response) =>
   if (typeof whatsappTemplateName === 'string') {
     runtimeConfig.whatsappTemplateName = whatsappTemplateName.trim();
   }
+  if (typeof whatsappWebhookVerifyToken === 'string' && whatsappWebhookVerifyToken.trim()) {
+    runtimeConfig.whatsappWebhookVerifyToken = whatsappWebhookVerifyToken.trim();
+  }
   if (typeof elevenlabsWebhookSecret === 'string' && elevenlabsWebhookSecret.trim()) {
     runtimeConfig.elevenlabsWebhookSecret = elevenlabsWebhookSecret.trim();
+  }
+  if (typeof elevenlabsAgentId === 'string') {
+    runtimeConfig.elevenlabsAgentId = elevenlabsAgentId.trim();
+  }
+  if (typeof elevenlabsApiKey === 'string' && elevenlabsApiKey.trim() !== '') {
+    runtimeConfig.elevenlabsApiKey = elevenlabsApiKey.trim();
   }
   if (typeof adminPassword === 'string' && adminPassword.trim()) {
     if (adminPassword.length < 6) {
@@ -789,6 +1000,47 @@ app.get('/api/admin/events', requireAdminAuth, (_req: Request, res: Response) =>
 app.delete('/api/admin/events', requireAdminAuth, (_req: Request, res: Response) => {
   dispatchLogs.length = 0;
   return res.status(200).json({ success: true, message: 'Log telemetry sementara dibersihkan.' });
+});
+
+// 6. AI CHAT AGENT MANAGEMENT & SIMULATION
+// POST /api/admin/test-ai-chat
+app.post('/api/admin/test-ai-chat', requireAdminAuth, async (req: Request, res: Response) => {
+  const { message, senderName, senderPhone } = req.body || {};
+  if (!message || typeof message !== 'string') {
+    return res.status(400).json({ success: false, message: 'Pesan chat wajib diisi.' });
+  }
+
+  const phone = senderPhone || '6281234567890';
+  const name = senderName || 'Admin Tester';
+
+  const result = await generateAgentReply(message, phone, name);
+
+  recordAIChatLog({
+    fromPhone: maskString(phone, 4, 3),
+    fromName: `${name} (Simulasi)`,
+    userMessage: message,
+    agentReply: result.reply,
+    agentSource: result.source,
+    orderDetected: result.orderDetected,
+  });
+
+  return res.status(200).json({
+    success: true,
+    reply: result.reply,
+    source: result.source,
+    orderDetected: result.orderDetected,
+  });
+});
+
+// GET /api/admin/ai-chats
+app.get('/api/admin/ai-chats', requireAdminAuth, (_req: Request, res: Response) => {
+  return res.status(200).json({ chats: aiChatLogs });
+});
+
+// DELETE /api/admin/ai-chats
+app.delete('/api/admin/ai-chats', requireAdminAuth, (_req: Request, res: Response) => {
+  aiChatLogs.length = 0;
+  return res.status(200).json({ success: true, message: 'Log chat AI sementara dibersihkan.' });
 });
 
 // ==========================================

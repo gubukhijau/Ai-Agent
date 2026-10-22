@@ -1,4 +1,4 @@
-import { AdminConfig, DispatchLogEntry, OrderPayload } from '../types';
+import { AdminConfig, DispatchLogEntry, OrderPayload, AIChatLogEntry } from '../types';
 
 const TOKEN_KEY = 'ipl_admin_token';
 
@@ -107,7 +107,10 @@ export async function saveAdminConfig(config: Partial<{
   whatsappAdminNumber: string;
   whatsappApiVersion: string;
   whatsappTemplateName: string;
+  whatsappWebhookVerifyToken: string;
   elevenlabsWebhookSecret: string;
+  elevenlabsAgentId: string;
+  elevenlabsApiKey: string;
   adminPassword?: string;
 }>): Promise<{ success: boolean; message: string }> {
   try {
@@ -225,6 +228,71 @@ export async function clearDispatchEvents(): Promise<void> {
       notifyAuthExpired();
     }
   } catch (e) {
+    // ignore
+  }
+}
+
+export async function testAIChat(
+  message: string,
+  senderName?: string,
+  senderPhone?: string
+): Promise<{
+  success: boolean;
+  reply: string;
+  source: 'elevenlabs' | 'indoplangsir_ai';
+  orderDetected: boolean;
+}> {
+  try {
+    const res = await fetch('/api/admin/test-ai-chat', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ message, senderName, senderPhone }),
+    });
+    if (res.status === 401) {
+      notifyAuthExpired();
+      throw new Error('Sesi admin kedaluwarsa.');
+    }
+    return await res.json();
+  } catch (err: any) {
+    return {
+      success: false,
+      reply: err?.message || 'Gagal menghubungi asisten AI.',
+      source: 'indoplangsir_ai',
+      orderDetected: false,
+    };
+  }
+}
+
+export async function fetchAIChats(): Promise<AIChatLogEntry[]> {
+  const token = getStoredToken();
+  if (!token) return [];
+
+  try {
+    const res = await fetch('/api/admin/ai-chats', {
+      headers: getAuthHeaders(),
+    });
+    if (res.status === 401) {
+      notifyAuthExpired();
+      return [];
+    }
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.chats || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function clearAIChats(): Promise<void> {
+  try {
+    const res = await fetch('/api/admin/ai-chats', {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+    if (res.status === 401) {
+      notifyAuthExpired();
+    }
+  } catch {
     // ignore
   }
 }

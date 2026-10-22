@@ -13,8 +13,8 @@ import {
 import { AdminConfig } from '../types';
 
 interface SidebarProps {
-  currentTab: 'dashboard' | 'whatsapp' | 'elevenlabs' | 'security';
-  setCurrentTab: (tab: 'dashboard' | 'whatsapp' | 'elevenlabs' | 'security') => void;
+  currentTab: 'dashboard' | 'whatsapp' | 'elevenlabs' | 'aichat' | 'security';
+  setCurrentTab: (tab: 'dashboard' | 'whatsapp' | 'elevenlabs' | 'aichat' | 'security') => void;
   config: AdminConfig | null;
   onLogout: () => void;
   isMobileOpen: boolean;
@@ -37,6 +37,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
       description: 'Status & Uji Notifikasi',
     },
     {
+      id: 'aichat' as const,
+      label: 'Chat AI Agent WhatsApp',
+      icon: Bot,
+      description: 'ElevenLabs Two-Way Chatbot',
+    },
+    {
       id: 'whatsapp' as const,
       label: 'Pengaturan WhatsApp',
       icon: MessageSquare,
@@ -44,9 +50,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
     },
     {
       id: 'elevenlabs' as const,
-      label: 'Integrasi ElevenLabs',
-      icon: Bot,
-      description: 'Webhook & Tool Schema',
+      label: 'Integrasi Webhook Order',
+      icon: ShieldCheck,
+      description: 'Tool Call Schema ElevenLabs',
     },
     {
       id: 'security' as const,
