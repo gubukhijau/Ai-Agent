@@ -383,9 +383,17 @@ export const AIChatAgentView: React.FC<AIChatAgentViewProps> = ({
               </div>
 
               {/* Status Note */}
-              <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg text-[11px] text-amber-200 leading-relaxed">
-                <strong className="text-white block mb-0.5">Mode Asisten Cerdas Aktif:</strong>
-                Meskipun Agent ID ElevenLabs belum diisi, nomor WhatsApp Anda sudah otomatis aktif menjawab pertanyaan pelanggan menggunakan <strong>IndoPlangsir Heavy Equipment Intelligence</strong> (katalog armada, harga ritase, dan pengumpulan 8 data order).
+              <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-[11px] text-emerald-200 leading-relaxed space-y-1">
+                <div className="font-bold text-white flex items-center gap-1.5">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Otomasi Balasan ElevenLabs AI Agent:</span>
+                </div>
+                <p className="text-slate-300">
+                  Setiap pesan WhatsApp yang dikirim pelanggan akan <strong>diteruskan langsung ke ElevenLabs Conversational AI Agent</strong> Anda. Jawaban dari ElevenLabs kemudian dikirimkan kembali secara otomatis ke chat WhatsApp pelanggan.
+                </p>
+                <p className="text-slate-400 text-[10px]">
+                  Jika ID Agen ElevenLabs belum diset, sistem secara otomatis menggunakan fallback Gemini AI &amp; IndoPlangsir Intelligence agar pelanggan tetap terlayani 24/7.
+                </p>
               </div>
 
               {saveMsg && (

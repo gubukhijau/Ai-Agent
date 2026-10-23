@@ -9,6 +9,7 @@ export interface WhatsAppReplyResult {
   replyText?: string;
   whatsappMessageId?: string;
   orderDetected?: boolean;
+  source?: 'elevenlabs' | 'gemini' | 'rule_based';
   error?: string;
 }
 
@@ -22,13 +23,151 @@ export function sanitizePhoneNumber(phone: string): string {
   return clean;
 }
 
-// Generate intelligent AI response for IndoPlangsir
+/**
+ * Connect directly to ElevenLabs Conversational AI Agent via WebSocket
+ * Sends user text message and captures the agent's textual response.
+ */
+export async function queryElevenLabsConversationalAgent(
+  agentId: string,
+  apiKey: string,
+  userText: string,
+  fromPhone: string,
+  senderName = 'Pelanggan'
+): Promise<string | null> {
+  const cleanAgentId = (agentId || '').trim();
+  if (!cleanAgentId) return null;
+
+  return new Promise(async (resolve) => {
+    let resolved = false;
+    const safeResolve = (val: string | null) => {
+      if (!resolved) {
+        resolved = true;
+        resolve(val);
+      }
+    };
+
+    // 9-second timeout safety guard so WhatsApp webhook responds promptly
+    const timer = setTimeout(() => {
+      console.warn('[ElevenLabs ConvAI] Timeout waiting for ElevenLabs agent response (9s limit)');
+      safeResolve(null);
+    }, 9000);
+
+    let wsUrl = `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${cleanAgentId}`;
+
+    // If an API key is provided, request a signed WebSocket URL from ElevenLabs
+    const cleanApiKey = (apiKey || '').trim();
+    if (cleanApiKey) {
+      try {
+        const res = await fetch(
+          `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${cleanAgentId}`,
+          {
+            headers: {
+              'xi-api-key': cleanApiKey,
+            },
+          }
+        );
+        if (res.ok) {
+          const data: any = await res.json();
+          if (data?.signed_url) {
+            wsUrl = data.signed_url;
+            console.log('[ElevenLabs ConvAI] Menggunakan authenticated signed URL untuk koneksi agen');
+          }
+        } else {
+          console.warn(`[ElevenLabs ConvAI] Gagal mendapatkan signed URL (HTTP ${res.status}), mencoba URL agen langsung`);
+        }
+      } catch (err: any) {
+        console.warn('[ElevenLabs ConvAI] Error fetching signed URL:', err?.message);
+      }
+    }
+
+    try {
+      const ws = new WebSocket(wsUrl);
+      let agentReply = '';
+      let finishTimer: NodeJS.Timeout | null = null;
+
+      const finishAndClose = () => {
+        clearTimeout(timer);
+        if (finishTimer) clearTimeout(finishTimer);
+        try {
+          ws.close();
+        } catch {}
+        safeResolve(agentReply.trim() || null);
+      };
+
+      ws.onopen = () => {
+        console.log(`[ElevenLabs ConvAI] Terhubung ke WebSocket Agen ${cleanAgentId}. Mengirim pesan pelanggan...`);
+        // 1. Send conversation initiation client data with customer variables
+        ws.send(
+          JSON.stringify({
+            type: 'conversation_initiation_client_data',
+            dynamic_variables: {
+              user_name: senderName,
+              user_phone: fromPhone,
+            },
+          })
+        );
+
+        // 2. Inject user text message
+        ws.send(
+          JSON.stringify({
+            type: 'user_message',
+            text: userText,
+          })
+        );
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(String(event.data));
+
+          if (data.type === 'agent_response' && data.agent_response_event?.agent_response) {
+            const chunk = data.agent_response_event.agent_response;
+            agentReply += (agentReply ? ' ' : '') + chunk;
+
+            // Wait 1.2s for subsequent chained text chunks
+            if (finishTimer) clearTimeout(finishTimer);
+            finishTimer = setTimeout(finishAndClose, 1200);
+          }
+
+          if (
+            data.type === 'agent_response_correction' &&
+            data.agent_response_correction_event?.corrected_agent_response
+          ) {
+            agentReply = data.agent_response_correction_event.corrected_agent_response;
+          }
+
+          // Complete on interruption or ping after answer
+          if (data.type === 'interruption' || (agentReply && data.type === 'ping')) {
+            finishAndClose();
+          }
+        } catch {
+          // ignore parse error
+        }
+      };
+
+      ws.onerror = (e) => {
+        console.warn('[ElevenLabs ConvAI] WebSocket error encountered:', e);
+        finishAndClose();
+      };
+
+      ws.onclose = () => {
+        finishAndClose();
+      };
+    } catch (err: any) {
+      console.warn('[ElevenLabs ConvAI] Exception creating WebSocket:', err?.message);
+      clearTimeout(timer);
+      safeResolve(null);
+    }
+  });
+}
+
+// Generate intelligent AI response: ElevenLabs Agent (Primary) -> Gemini AI -> IndoPlangsir Rules
 export async function generateIndoPlangsirAIReply(
   userText: string,
   fromPhone: string,
   fromName = 'Bapak/Ibu',
   agentConfig?: { elevenlabsAgentId?: string; elevenlabsApiKey?: string }
-): Promise<{ reply: string; source: 'gemini' | 'elevenlabs' | 'rule_based'; orderDetected: boolean }> {
+): Promise<{ reply: string; source: 'elevenlabs' | 'gemini' | 'rule_based'; orderDetected: boolean }> {
   const text = (userText || '').trim();
   const lower = text.toLowerCase();
   const displayName = fromName ? fromName.split(' ')[0] : 'Bapak/Ibu';
@@ -39,7 +178,32 @@ export async function generateIndoPlangsirAIReply(
   const hasMaterial = /tanah|puing|pasir|sirtu|batu|urug|buang/i.test(lower);
   const orderDetected = hasOrderIntent || (hasRit && hasMaterial);
 
-  // 1. Try Gemini AI if API key is present
+  // 1. ELEVENLABS CONVERSATIONAL AI AGENT (UTAMA / PRIORITAS 1)
+  const agentId = (agentConfig?.elevenlabsAgentId || process.env.ELEVENLABS_AGENT_ID || '').trim();
+  const apiKey = (agentConfig?.elevenlabsApiKey || process.env.ELEVENLABS_API_KEY || '').trim();
+
+  if (agentId) {
+    try {
+      console.log(`[AI Auto-Reply] Menghubungi ElevenLabs Agent (${agentId}) untuk memproses pesan pelanggan...`);
+      const elevenLabsReply = await queryElevenLabsConversationalAgent(
+        agentId,
+        apiKey,
+        text,
+        fromPhone,
+        displayName
+      );
+
+      if (elevenLabsReply && elevenLabsReply.trim().length > 0) {
+        console.log(`[AI Auto-Reply] Sukses! Jawaban dihasilkan oleh ElevenLabs Agent: "${elevenLabsReply.slice(0, 80)}..."`);
+        return { reply: elevenLabsReply.trim(), source: 'elevenlabs', orderDetected };
+      }
+      console.warn('[AI Auto-Reply] ElevenLabs tidak mengembalikan teks balasan, beralih ke engine cadangan.');
+    } catch (elErr: any) {
+      console.warn('[AI Auto-Reply] Exception saat memanggil ElevenLabs Agent:', elErr?.message || elErr);
+    }
+  }
+
+  // 2. Gemini AI fallback if GEMINI_API_KEY is available
   const geminiKey = process.env.GEMINI_API_KEY;
   if (geminiKey && geminiKey !== 'MY_GEMINI_API_KEY') {
     try {
@@ -88,7 +252,7 @@ Aturan:
     }
   }
 
-  // 2. Intelligent Rule-based IndoPlangsir Engine
+  // 3. Built-in Rule Engine (Fallback terakhir jika internet ke ElevenLabs & Gemini terputus)
   let reply = '';
   if (orderDetected) {
     reply = `Halo ${displayName}, terima kasih sudah menghubungi WhatsApp Resmi IndoPlangsir! 🚜\n\nPermintaan pesanan Anda sudah kami catat di sistem operasional. Agar mandor armada kami dapat mengonfirmasi ketersediaan dump truck dan total ritase ke lokasi Anda, mohon lengkapi:\n\n1. Nama Pemesan:\n2. Alamat Proyek:\n3. Jenis Layanan (Urug Tanah / Buang Puing / Pasir Cor / Sirtu):\n4. Armada (Colt Diesel 7-8m³ / Tronton 22-24m³ / Engkel 4m³):\n5. Jumlah Ritase:\n6. Jadwal Pengiriman:\n\nAdmin kami juga akan segera memverifikasi ketersediaan armada langsung ke nomor WhatsApp ini. 🙏`;
@@ -219,7 +383,7 @@ export async function processIncomingWhatsAppMessage(
 
   console.log(`[WhatsApp Inbound] Pesan baru dari ${senderName} (${fromPhone}): "${userText}"`);
 
-  // 1. Generate AI Response
+  // 1. Generate AI Response (Prioritizes ElevenLabs Conversational Agent)
   const aiResult = await generateIndoPlangsirAIReply(userText, fromPhone, senderName, {
     elevenlabsAgentId: options?.elevenlabsAgentId,
     elevenlabsApiKey: options?.elevenlabsApiKey,
@@ -253,7 +417,7 @@ export async function processIncomingWhatsAppMessage(
         `Pelanggan: *${senderName}*\n` +
         `WhatsApp: https://wa.me/${fromPhone}\n` +
         `Pesan: "${userText}"\n\n` +
-        `AI Agent telah merespons dan meminta detail ritase/lokasi. Silakan pantau atau hubungi pelanggan.`;
+        `AI Agent ElevenLabs telah membalas langsung ke nomor pelanggan. Silakan pantau atau hubungi pelanggan jika diperlukan.`;
 
       sendWhatsAppMessageDirectly(cleanAdmin, adminNotice, {
         phoneNumberId: options?.whatsappPhoneNumberId,
@@ -271,6 +435,7 @@ export async function processIncomingWhatsAppMessage(
     replyText,
     whatsappMessageId: sendResult.messageId,
     orderDetected: aiResult.orderDetected,
+    source: aiResult.source,
     error: sendResult.error,
   };
 }
